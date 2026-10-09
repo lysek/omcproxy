@@ -66,6 +66,7 @@ table_t* allow_parse(char* allow) {
 		//fprintf(stderr, "Error while allocating new table.\n");
 		return NULL;
 	}
+	short** table = malloc(counter * sizeof(short*)); // with 5 elements with
 	for(int i = 0; i < counter; i++) { // record for every address
 		short* array = malloc(4 * sizeof(short));
 		if (array == NULL) {
