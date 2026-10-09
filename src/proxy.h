@@ -35,11 +35,25 @@ enum proxy_flags {
 	// internal values
 	_PROXY_UNUSED = 1 << 5,
 	_PROXY_SCOPEMASK = 0xf,
+
+	// allow table scope
+	PROXY_ALLOW = 0b1000011,
 };
 
+// new struct - added allow functionality
+typedef struct table {
+	int records_cnt;
+	short** table;
+} table_t;
 
-int proxy_set(int uplink, const int downlinks[], size_t downlinks_cnt, enum proxy_flags flags);
+int proxy_set(int uplink, const int downlinks[], size_t downlinks_cnt, enum proxy_flags flags, table_t* allowTable);
 
 
 void proxy_update(bool all);
 void proxy_flush(void);
+
+// additional functions - added allow functionality
+table_t* allow_parse(char* allow);
+void allow_table_fill(table_t* allowTable, char* argument);
+void allow_table_free(table_t* allowTable);
+void allow_table_add_address(short* array, char* address);

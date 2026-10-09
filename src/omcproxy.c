@@ -42,7 +42,7 @@ static struct blobmsg_policy proxy_policy[PROXY_ATTR_MAX] = {
 	[PROXY_ATTR_DEST] = { .name = "dest", .type = BLOBMSG_TYPE_ARRAY },
 };
 
-static int handle_proxy_set(void *data, size_t len)
+static int handle_proxy_set(void *data, size_t len, char* allow) // added "allow"
 {
 	struct blob_attr *tb[PROXY_ATTR_MAX], *c;
 	blobmsg_parse(proxy_policy, PROXY_ATTR_MAX, tb, data, len);
@@ -52,6 +52,7 @@ static int handle_proxy_set(void *data, size_t len)
 	int downlinks[32] = {0};
 	size_t downlinks_cnt = 0;
 	enum proxy_flags flags = 0;
+	table_t* allowTable = NULL;
 
 	if (!name)
 		return -EINVAL;
@@ -73,6 +74,14 @@ static int handle_proxy_set(void *data, size_t len)
 			flags = PROXY_ADMINLOCAL;
 		else if (!strcmp(scope, "realm"))
 			flags = PROXY_REALMLOCAL;
+		else if (!strcmp(scope, "allow")) {
+			flags = PROXY_ALLOW;
+			allowTable = allow_parse(allow);
+			if (allowTable == NULL) {
+				L_WARN("%s(%s): invalid allow (%s)", __FUNCTION__, name, allow);
+                return -EINVAL;
+            }
+		}
 
 		if (!flags) {
 			L_WARN("%s(%s): invalid scope (%s)", __FUNCTION__, name, scope);
@@ -86,18 +95,22 @@ static int handle_proxy_set(void *data, size_t len)
 		blobmsg_for_each_attr(d, c, rem) {
 			if (downlinks_cnt >= 32) {
 				L_WARN("%s(%s): maximum number of destinations exceeded", __FUNCTION__, name);
+				if (allowTable)
+					allow_table_free(allowTable);
 				return -EINVAL;
 			}
 
 			const char *n = blobmsg_type(d) == BLOBMSG_TYPE_STRING ? blobmsg_get_string(d) : "";
 			if (!(downlinks[downlinks_cnt++] = if_nametoindex(n))) {
 				L_WARN("%s(%s): %s (%s)", __FUNCTION__, name, strerror(errno), blobmsg_get_string(d));
+				if (allowTable)
+					allow_table_free(allowTable);
 				return -errno;
 			}
 		}
 	}
 
-	return proxy_set(uplink, downlinks, downlinks_cnt, flags);
+	return proxy_set(uplink, downlinks, downlinks_cnt, flags, allowTable);
 }
 
 static void handle_signal(__unused int signal)
@@ -110,6 +123,8 @@ static void usage(const char *arg) {
 			"\nProxy examples:\n"
 			"eth1,eth2\n"
 			"eth1,eth2,eth3,scope=organization\n"
+			"eth1,eth2,allow=239.192.60:239.23:239.100\n"
+			"eth1,eth2,allow=239.255.0\n"
 			"\nProxy options (each option may only occur once):\n"
 			"	<interface>			interfaces to proxy (first is uplink)\n"
 			"	scope=<scope>			minimum multicast scope to proxy\n"
@@ -139,6 +154,7 @@ int main(int argc, char **argv) {
 	for (ssize_t i = 1; i < argc; ++i) {
 		const char *source = NULL;
 		const char *scope = NULL;
+		char *allow = NULL;
 		struct blob_buf b = {NULL, NULL, 0, NULL};
 
 		if (!strcmp(argv[i], "-h")) {
@@ -161,6 +177,9 @@ int main(int argc, char **argv) {
 				scope = &c[6];
 			} else if (!source) {
 				source = c;
+			} else if (!strncmp(c, "allow=", 6)) {	// added allow functionality
+				scope = "allow";
+				allow = &c[6];
 			} else {
 				blobmsg_add_string(&b, NULL, c);
 			}
@@ -173,7 +192,7 @@ int main(int argc, char **argv) {
 		if (scope)
 			blobmsg_add_string(&b, "scope", scope);
 
-		if (handle_proxy_set(blob_data(b.head), blob_len(b.head))) {
+		if (handle_proxy_set(blob_data(b.head), blob_len(b.head), allow)) { // added allow
 			fprintf(stderr, "failed to setup proxy: %s\n", argv[i]);
 			start = false;
 		}
