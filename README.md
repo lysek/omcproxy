@@ -26,3 +26,11 @@ The easiest way to compile omcproxy is by using `devel-build.sh` script within `
 
 Note that `cmake` is required.
 
+## Tests
+
+Compiling and running the tests separately after running `scripts/devel-build.sh`:
+
+```bash
+make -C build
+./build/test_allow
+```

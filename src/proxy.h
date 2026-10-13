@@ -20,6 +20,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <netinet/in.h>
+#include "allow.h"
 
 enum proxy_flags {
 	// minimum scope to proxy (use only one, includes higher scopes)
@@ -35,10 +36,13 @@ enum proxy_flags {
 	// internal values
 	_PROXY_UNUSED = 1 << 5,
 	_PROXY_SCOPEMASK = 0xf,
+
+	// allow table scope
+	PROXY_ALLOW = 0b1000011,
 };
 
 
-int proxy_set(int uplink, const int downlinks[], size_t downlinks_cnt, enum proxy_flags flags);
+int proxy_set(int uplink, const int downlinks[], size_t downlinks_cnt, enum proxy_flags flags, table_t* allowTable);
 
 
 void proxy_update(bool all);

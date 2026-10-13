@@ -58,6 +58,8 @@ cmake							\
 	${BUILD_ARGS}
 make -C "${BUILDDIR}"
 
+cd "${BUILDDIR}" && ctest --output-on-failure
+
 set +x
 echo "✅ Success - the omcproxy binary is available at ${BUILDDIR}/omcproxy"
 echo "👷 You can rebuild omcproxy by running 'make -C build'"

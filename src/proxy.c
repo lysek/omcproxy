@@ -22,6 +22,7 @@
 #include "client.h"
 #include "mrib.h"
 #include "proxy.h"
+#include "allow.h"
 
 struct proxy {
 	struct list_head head;
@@ -29,6 +30,7 @@ struct proxy {
 	struct mrib_user mrib;
 	struct querier querier;
 	enum proxy_flags flags;
+	table_t* allowTable; // added allow functionality
 };
 
 struct proxy_downlink {
@@ -36,7 +38,10 @@ struct proxy_downlink {
 	struct mrib_user mrib;
 	struct client client;
 	enum proxy_flags flags;
+	table_t* allowTable; // added allow functionality
 };
+
+
 
 static struct list_head proxies = LIST_HEAD_INIT(proxies);
 
@@ -50,22 +55,30 @@ static void proxy_remove_downlink(struct proxy_downlink *downlink)
 }
 
 // Match scope of a multicast-group against proxy scope-filter
-static bool proxy_match_scope(enum proxy_flags flags, const struct in6_addr *addr)
+static bool proxy_match_scope(enum proxy_flags flags, const struct in6_addr *addr, table_t* allowTable) // added allowTable
 {
-	unsigned scope = 0;
-	if (IN6_IS_ADDR_V4MAPPED(addr)) {
-		if (addr->s6_addr[12] == 239 && addr->s6_addr[13] == 255)
-			scope = PROXY_REALMLOCAL;
-		else if (addr->s6_addr[12] == 239 && (addr->s6_addr[13] & 0xfc) == 192)
-			scope = PROXY_ORGLOCAL;
-		else if (addr->s6_addr[12] == 224 && addr->s6_addr[13] == 0 && addr->s6_addr[14] == 0)
-			scope = 2;
-		else
-			scope = PROXY_GLOBAL;
+	bool isMatching = false;
+	if (flags == PROXY_ALLOW) { // added allow functionality
+		if(IN6_IS_ADDR_V4MAPPED(addr)) {
+			isMatching = allow_match_address(addr, allowTable);
+		}
 	} else {
-		scope = addr->s6_addr[1] & 0xf;
+		unsigned scope = 0;
+		if (IN6_IS_ADDR_V4MAPPED(addr)) {
+			if (addr->s6_addr[12] == 239 && addr->s6_addr[13] == 255)
+				scope = PROXY_REALMLOCAL;
+			else if (addr->s6_addr[12] == 239 && (addr->s6_addr[13] & 0xfc) == 192)
+				scope = PROXY_ORGLOCAL;
+			else if (addr->s6_addr[12] == 224 && addr->s6_addr[13] == 0 && addr->s6_addr[14] == 0)
+				scope = 2;
+			else
+				scope = PROXY_GLOBAL;
+		} else {
+			scope = addr->s6_addr[1] & 0xf;
+		}
+		isMatching = scope >= (flags & _PROXY_SCOPEMASK);
 	}
-	return scope >= (flags & _PROXY_SCOPEMASK);
+	return isMatching;
 }
 
 // Test and set multicast route (called by mrib on detection of new source)
@@ -73,7 +86,7 @@ static void proxy_mrib(struct mrib_user *mrib, const struct in6_addr *group,
 		const struct in6_addr *source, mrib_filter *filter)
 {
 	struct proxy *proxy = container_of(mrib, struct proxy, mrib);
-	if (!proxy_match_scope(proxy->flags, group))
+	if (!proxy_match_scope(proxy->flags, group, proxy->allowTable))
 		return;
 
 	omgp_time_t now = omgp_time();
@@ -92,7 +105,7 @@ static void proxy_trigger(struct querier_user_iface *user, const struct in6_addr
 		bool include, const struct in6_addr *sources, size_t len)
 {
 	struct proxy_downlink *iface = container_of(user, struct proxy_downlink, iface);
-	if (proxy_match_scope(iface->flags, group))
+	if (proxy_match_scope(iface->flags, group, iface->allowTable))
 		client_set(&iface->client, group, include, sources, len);
 }
 
@@ -112,6 +125,10 @@ static int proxy_unset(struct proxy *proxyp)
 				proxy_remove_downlink(container_of(i, struct proxy_downlink, iface));
 			}
 
+			if (proxy->allowTable != NULL) {
+				allow_table_free(proxy->allowTable); // added allow functionality - to free the allow table
+                proxy->allowTable = NULL;
+			}
 			querier_deinit(&proxy->querier);
 			list_del(&proxy->head);
 			free(proxy);
@@ -122,11 +139,14 @@ static int proxy_unset(struct proxy *proxyp)
 }
 
 // Add / update proxy
-int proxy_set(int uplink, const int downlinks[], size_t downlinks_cnt, enum proxy_flags flags)
+int proxy_set(int uplink, const int downlinks[], size_t downlinks_cnt, enum proxy_flags flags, table_t* allowTable) // added allowTable
 {
 	struct proxy *proxy = NULL, *p;
 	list_for_each_entry(p, &proxies, head)
-		if (p->ifindex == uplink)
+		if (
+			p->ifindex == uplink &&
+			p->allowTable == allowTable
+		)
 			proxy = p;
 
 	if (proxy && (downlinks_cnt == 0 ||
@@ -147,6 +167,7 @@ int proxy_set(int uplink, const int downlinks[], size_t downlinks_cnt, enum prox
 
 		proxy->flags = flags;
 		proxy->ifindex = uplink;
+		proxy->allowTable = allowTable;
 		querier_init(&proxy->querier);
 		list_add(&proxy->head, &proxies);
 		if (mrib_attach_user(&proxy->mrib, uplink, proxy_mrib))
@@ -191,6 +212,7 @@ int proxy_set(int uplink, const int downlinks[], size_t downlinks_cnt, enum prox
 			goto downlink_err1;
 
 		downlink->flags = proxy->flags;
+		downlink->allowTable = proxy->allowTable;
 		continue;
 
 downlink_err1:
