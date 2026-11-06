@@ -20,6 +20,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <netinet/in.h>
+#include "allow.h"
 
 #include "querier.h"
 
@@ -37,6 +38,9 @@ enum proxy_flags {
 	// internal values
 	_PROXY_UNUSED = 1 << 5,
 	_PROXY_SCOPEMASK = 0xf,
+
+	// allow table scope
+	PROXY_ALLOW = 1 << 6,
 };
 
 
@@ -55,7 +59,7 @@ struct proxy_options {
 };
 
 int proxy_set(const char *uplink, const char *downlinks[], size_t downlinks_cnt, enum proxy_flags flags,
-		const struct proxy_options *opts);
+		const struct proxy_options *opts, table_t* allow_table);
 
 
 void proxy_reconcile_all(void);

@@ -28,6 +28,7 @@
 #include "client.h"
 #include "mrib.h"
 #include "proxy.h"
+#include "allow.h"
 
 struct proxy {
 	struct list_head head;
@@ -38,6 +39,7 @@ struct proxy {
 	struct querier querier;
 	enum proxy_flags flags;
 	struct proxy_options opts;
+	table_t* allow_table;
 	bool attached;
 };
 
@@ -50,6 +52,7 @@ struct proxy_downlink {
 	char *ifname;
 	int ifindex;
 	enum proxy_flags flags;
+	table_t* allow_table;
 	bool attached;
 };
 
@@ -78,8 +81,12 @@ static void proxy_remove_downlink(struct proxy_downlink *downlink)
 }
 
 // Match scope of a multicast-group against proxy scope-filter
-static bool proxy_match_scope(enum proxy_flags flags, const struct in6_addr *addr)
+static bool proxy_match_scope(enum proxy_flags flags, const struct in6_addr *addr, table_t* allow_table)
 {
+	if (flags & PROXY_ALLOW)
+		return IN6_IS_ADDR_V4MAPPED(addr) &&
+				allow_match_address(addr, allow_table);
+
 	unsigned scope = 0;
 	if (IN6_IS_ADDR_V4MAPPED(addr)) {
 		if (addr->s6_addr[12] == 239 && addr->s6_addr[13] == 255)
@@ -121,7 +128,7 @@ static void proxy_mrib(struct mrib_user *mrib, const struct in6_addr *group,
 		const struct in6_addr *source, mrib_filter *filter)
 {
 	struct proxy *proxy = container_of(mrib, struct proxy, mrib);
-	if (!proxy_match_scope(proxy->flags, group) || !proxy_match_source(proxy, source))
+	if (!proxy_match_scope(proxy->flags, group, proxy->allow_table) || !proxy_match_source(proxy, source))
 		return;
 
 	omgp_time_t now = omgp_time();
@@ -140,7 +147,7 @@ static void proxy_trigger(struct querier_user_iface *user, const struct in6_addr
 		bool include, const struct in6_addr *sources, size_t len)
 {
 	struct proxy_downlink *iface = container_of(user, struct proxy_downlink, iface);
-	if (!proxy_match_scope(iface->flags, group))
+	if (!proxy_match_scope(iface->flags, group, iface->allow_table))
 		return;
 
 	client_set(&iface->client, group, include, sources, len);
@@ -306,6 +313,10 @@ static int proxy_unset(struct proxy *proxyp)
 				proxy_remove_downlink(downlink);
 
 			proxy_detach(proxy);
+			if (proxy->allow_table != NULL) {
+				allow_table_free(proxy->allow_table);
+				proxy->allow_table = NULL;
+			}
 			querier_deinit(&proxy->querier);
 			list_del(&proxy->head);
 			free(proxy->ifname);
@@ -319,27 +330,48 @@ static int proxy_unset(struct proxy *proxyp)
 // Add / update proxy. Interface names are kept as configuration; interfaces
 // may be absent or down and will be attached later by proxy_reconcile().
 int proxy_set(const char *uplink, const char *downlinks[], size_t downlinks_cnt, enum proxy_flags flags,
-		const struct proxy_options *opts)
+		const struct proxy_options *opts, table_t* allow_table)
 {
 	struct proxy *proxy = NULL, *p;
 	int ret = 0;
 
-	list_for_each_entry(p, &proxies, head)
-		if (!strcmp(p->ifname, uplink))
+	list_for_each_entry(p, &proxies, head) {
+		if (!strcmp(p->ifname, uplink)) {
 			proxy = p;
-
-	if (proxy && (downlinks_cnt == 0 ||
-			((proxy->flags & _PROXY_SCOPEMASK) != (flags & _PROXY_SCOPEMASK)))) {
-		proxy_unset(proxy);
-		proxy = NULL;
+			break;
+		}
 	}
 
-	if (downlinks_cnt <= 0)
+	if (proxy) {
+		bool old_allow = proxy->flags & PROXY_ALLOW;
+		bool new_allow = flags & PROXY_ALLOW;
+		bool scope_changed =
+				(proxy->flags & _PROXY_SCOPEMASK) != (flags & _PROXY_SCOPEMASK);
+
+		if (downlinks_cnt == 0 || old_allow || new_allow || scope_changed) {
+			proxy_unset(proxy);
+			proxy = NULL;
+		}
+	}
+
+	if (downlinks_cnt <= 0) {
+		allow_table_free(allow_table);
 		return 0;
+	}
 
 	if (!proxy) {
-		if (!(proxy = calloc(1, sizeof(*proxy))))
+		proxy = calloc(1, sizeof(*proxy));
+		if (!proxy) {
+			allow_table_free(allow_table);
 			return -ENOMEM;
+		}
+
+		proxy->ifname = strdup(uplink);
+		if (!proxy->ifname) {
+			free(proxy);
+			allow_table_free(allow_table);
+			return -ENOMEM;
+		}
 
 		if ((flags & _PROXY_SCOPEMASK) == 0)
 			flags |= PROXY_GLOBAL;
@@ -349,11 +381,7 @@ int proxy_set(const char *uplink, const char *downlinks[], size_t downlinks_cnt,
 		if (opts)
 			proxy->opts = *opts;
 
-		proxy->ifname = strdup(uplink);
-		if (!proxy->ifname) {
-			free(proxy);
-			return -ENOMEM;
-		}
+		proxy->allow_table = allow_table;
 
 		INIT_LIST_HEAD(&proxy->downlinks);
 		querier_init(&proxy->querier);
@@ -397,6 +425,7 @@ int proxy_set(const char *uplink, const char *downlinks[], size_t downlinks_cnt,
 
 		downlink->proxy = proxy;
 		downlink->flags = proxy->flags;
+		downlink->allow_table = proxy->allow_table;
 		list_add_tail(&downlink->head, &proxy->downlinks);
 	}
 

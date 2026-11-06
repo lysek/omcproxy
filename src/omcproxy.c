@@ -32,6 +32,7 @@
 
 #include "omcproxy.h"
 #include "proxy.h"
+#include "allow.h"
 
 enum {
 	PROXY_ATTR_SOURCE,
@@ -46,7 +47,7 @@ static struct blobmsg_policy proxy_policy[PROXY_ATTR_MAX] = {
 	[PROXY_ATTR_DEST] = { .name = "dest", .type = BLOBMSG_TYPE_ARRAY },
 };
 
-static int handle_proxy_set(void *data, size_t len, const struct proxy_options *opts)
+static int handle_proxy_set(void *data, size_t len, const struct proxy_options *opts, const char* allow)
 {
 	struct blob_attr *tb[PROXY_ATTR_MAX], *c;
 	blobmsg_parse(proxy_policy, PROXY_ATTR_MAX, tb, data, len);
@@ -55,11 +56,25 @@ static int handle_proxy_set(void *data, size_t len, const struct proxy_options *
 	const char *downlinks[32];
 	size_t downlinks_cnt = 0;
 	enum proxy_flags flags = 0;
+	table_t* allow_table = NULL;
 
 	if (!name)
 		return -EINVAL;
 
-	if ((c = tb[PROXY_ATTR_SCOPE])) {
+	if (allow) {
+		if (tb[PROXY_ATTR_SCOPE]) {
+			L_WARN("%s(%s): allow= cannot be combined with scope=", __FUNCTION__, name);
+			return -EINVAL;
+		}
+
+		flags = PROXY_ALLOW;
+		allow_table = allow_parse(allow);
+		if (allow_table == NULL) {
+			L_WARN("%s(%s): invalid allow list (%s)", __FUNCTION__, name, allow);
+			fprintf(stderr, "invalid allow list: %s\n", allow);
+			return -EINVAL;
+		}
+	} else if ((c = tb[PROXY_ATTR_SCOPE])) {
 		const char *scope = blobmsg_get_string(c);
 		if (!strcmp(scope, "global"))
 			flags = PROXY_GLOBAL;
@@ -84,17 +99,25 @@ static int handle_proxy_set(void *data, size_t len, const struct proxy_options *
 		blobmsg_for_each_attr(d, c, rem) {
 			if (downlinks_cnt >= 32) {
 				L_WARN("%s(%s): maximum number of destinations exceeded", __FUNCTION__, name);
+				if (allow_table) {
+					allow_table_free(allow_table);
+					allow_table = NULL;
+				}
 				return -EINVAL;
 			}
 
 			if (blobmsg_type(d) != BLOBMSG_TYPE_STRING) {
+				if (allow_table) {
+					allow_table_free(allow_table);
+					allow_table = NULL;
+				}
 				return -EINVAL;
 			}
 
 			downlinks[downlinks_cnt++] = blobmsg_get_string(d);
 		}
 	}
-	return proxy_set(name, downlinks, downlinks_cnt, flags, opts);
+	return proxy_set(name, downlinks, downlinks_cnt, flags, opts, allow_table);
 }
 
 // Parse a positive integer option value
@@ -246,10 +269,13 @@ static void usage(const char *arg) {
 			"\nProxy examples:\n"
 			"eth1,eth2\n"
 			"eth1,eth2,eth3,scope=organization\n"
+			"eth1,eth2,allow=239.192.60+239.23+239.100\n"
+			"eth1,eth2,allow=239.255.0\n"
 			"\nProxy options (each option may only occur once):\n"
 			"	<interface>			interfaces to proxy (first is uplink)\n"
 			"	scope=<scope>			minimum multicast scope to proxy\n"
 			"		[global,organization,site,admin,realm] (default: global)\n"
+			"	allow=addr1+addr2		specify multicast IP4 addresses or its part (replaces scope)\n"
 			"	robustness=<n>			querier robustness variable (default: 2)\n"
 			"	query_interval=<s>		general query interval in seconds (default: 125)\n"
 			"	query_response_interval=<ds>	maximum response delay in tenths of a second (default: 100)\n"
@@ -261,6 +287,79 @@ static void usage(const char *arg) {
 			"	-v				verbose logging\n"
 			"	-h				show this help\n",
 	arg);
+}
+
+static bool parse_proxy_arg(char *argument)
+{
+	const char *source = NULL;
+	const char *scope = NULL;
+	const char *allow = NULL;
+	struct proxy_options opts;
+	bool valid = true;
+	struct blob_buf b = {NULL, NULL, 0, NULL};
+
+	memset(&opts, 0, sizeof(opts));
+	blob_buf_init(&b, 0);
+
+	void *k = blobmsg_open_array(&b, "dest");
+	for (char *c = strtok(argument, ","); c; c = strtok(NULL, ",")) {
+		if (!strncmp(c, "scope=", 6)) {
+			if (allow) {
+				fprintf(stderr, "cannot combine allow= with scope=\n");
+				valid = false;
+				break;
+			}
+			if (scope) {
+				fprintf(stderr, "scope= specified more than once\n");
+				valid = false;
+				break;
+			}
+			scope = &c[6];
+		} else if (!strncmp(c, "allow=", 6)) {
+			if (scope) {
+				fprintf(stderr, "cannot combine allow= with scope=\n");
+				valid = false;
+				break;
+			}
+			if (allow) {
+				fprintf(stderr, "allow= specified more than once\n");
+				valid = false;
+				break;
+			}
+			allow = &c[6];
+		} else if (strchr(c, '=') || !strcmp(c, "fast_leave")) {
+			if (!option_parse(c, &opts)) {
+				fprintf(stderr, "invalid proxy option: %s\n", c);
+				valid = false;
+			}
+		} else if (!source) {
+			source = c;
+		} else {
+			blobmsg_add_string(&b, NULL, c);
+		}
+	}
+
+	blobmsg_close_array(&b, k);
+
+	if (!valid) {
+		blob_buf_free(&b);
+		return false;
+	}
+
+	if (source)
+		blobmsg_add_string(&b, "source", source);
+
+	if (scope)
+		blobmsg_add_string(&b, "scope", scope);
+
+	if (handle_proxy_set(blob_data(b.head), blob_len(b.head), &opts, allow)) {
+		fprintf(stderr, "failed to setup proxy: %s\n", argument);
+		blob_buf_free(&b);
+		return false;
+	}
+
+	blob_buf_free(&b);
+	return true;
 }
 
 int main(int argc, char **argv) {
@@ -278,21 +377,16 @@ int main(int argc, char **argv) {
 
 	uloop_init();
 	bool start = true;
+	int status = 0;
 
 	if (rtnl_init()) {
 		L_ERR("failed to initialize rtnetlink listener: %s", strerror(errno));
 		start = false;
+		status = 1;
 	}
 
 	for (ssize_t i = 1; i < argc; ++i) {
-		const char *source = NULL;
-		const char *scope = NULL;
-		struct proxy_options opts;
-		struct blob_buf b = {NULL, NULL, 0, NULL};
-
-		memset(&opts, 0, sizeof(opts));
-
-		if (!strcmp(argv[i], "-h")) {
+		if (!strcmp(argv[i], "-h") || !strcmp(argv[i], "--help")) {
 			usage(argv[0]);
 			return 1;
 		} else if (!strncmp(argv[i], "-v", 2)) {
@@ -300,46 +394,16 @@ int main(int argc, char **argv) {
 			if ((log_level = atoi(&argv[i][2])) <= 0)
 				log_level = LOG_DEBUG;
 			setlogmask(LOG_UPTO(log_level));
-			continue;
-		}
-
-
-		blob_buf_init(&b, 0);
-
-		void *k = blobmsg_open_array(&b, "dest");
-		for (char *c = strtok(argv[i], ","); c; c = strtok(NULL, ",")) {
-			if (!strncmp(c, "scope=", 6)) {
-				scope = &c[6];
-			} else if (strchr(c, '=') || !strcmp(c, "fast_leave")) {
-				if (!option_parse(c, &opts)) {
-					fprintf(stderr, "invalid proxy option: %s\n", c);
-					start = false;
-				}
-			} else if (!source) {
-				source = c;
-			} else {
-				blobmsg_add_string(&b, NULL, c);
-			}
-		}
-		blobmsg_close_array(&b, k);
-
-		if (source)
-			blobmsg_add_string(&b, "source", source);
-
-		if (scope)
-			blobmsg_add_string(&b, "scope", scope);
-
-		if (handle_proxy_set(blob_data(b.head), blob_len(b.head), &opts)) {
-			fprintf(stderr, "failed to setup proxy: %s\n", argv[i]);
+		} else if (!parse_proxy_arg(argv[i])) {
 			start = false;
+			status = 1;
 		}
-
-		blob_buf_free(&b);
 	}
 
 	if (argc < 2) {
 		usage(argv[0]);
 		start = false;
+		status = 1;
 	}
 
 	if (start)
@@ -350,5 +414,5 @@ int main(int argc, char **argv) {
 	rtnl_deinit();
 
 	uloop_done();
-	return 0;
+	return status;
 }
