@@ -5,6 +5,7 @@ cmake_minimum_required(VERSION 3.13)
 project(omcproxy LANGUAGES C)
 add_executable(${PROJECT_NAME})
 target_sources(${PROJECT_NAME} PRIVATE
+	src/allow.c
 	src/client.c
 	src/groups.c
 	src/igmp.c
@@ -44,6 +45,10 @@ if(${L_LEVEL})
 	target_compile_definitions(${PROJECT_NAME} PRIVATE L_LEVEL=${L_LEVEL})
 endif(${L_LEVEL})
 
+# Tests
+enable_testing()
+add_executable(test_allow tests/test_allow.c src/allow.c)
+add_test(NAME test_allow COMMAND test_allow)
 
 # Installation
 install(TARGETS ${PROJECT_NAME} DESTINATION sbin/)

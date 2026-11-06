@@ -16,6 +16,13 @@ It is partly based on code of https://github.com/Oryon/pimbd
 	- Multiple instances support
 	- Address-scope specific proxying
 
+### Allow table functionality
+
+It is possible to filter particular IP v4 address multicast by passing `allow`
+instead of `scope` parameter. There can multiple addresses separated by `+` sign.
+The address can be a wildcard if part of it is omitted (e.g. `allow=239.1.2` will allow
+any final octet).
+
 ## Compiling
 
 The easiest way to compile omcproxy is by using `devel-build.sh` script within `sripts/` directory. Simply execute
@@ -36,3 +43,11 @@ make -C build
 ```
 
 They cover interface lifecycle handling and IPv4 multicast data forwarding through the proxy.
+The data-plane test runs twice, once with `scope=organization` and once with `allow=239.192.60`.
+
+Compiling and running the tests separately after running `scripts/devel-build.sh`:
+
+```bash
+make -C build
+./build/test_allow
+```

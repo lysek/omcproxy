@@ -7,3 +7,4 @@ OMCPROXY="${1:-/src/build/omcproxy}"
 
 "$SCRIPT_DIR/test-interface-lifecycle.sh" "$OMCPROXY"
 "$SCRIPT_DIR/test-dataplane.sh" "$OMCPROXY"
+"$SCRIPT_DIR/test-dataplane.sh" "$OMCPROXY" "allow=239.192.60"

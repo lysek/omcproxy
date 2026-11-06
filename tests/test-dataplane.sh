@@ -2,7 +2,8 @@
 
 set -u
 
-OMCPROXY="${1:?usage: $0 /path/to/omcproxy}"
+OMCPROXY="${1:?usage: $0 /path/to/omcproxy [filter]}"
+FILTER="${2:-scope=organization}"
 
 UPLINK="omc-uplink"
 DOWNLINK="omc-downlink"
@@ -248,9 +249,9 @@ DOWNLINK_IFINDEX="$(get_ifindex "$DOWNLINK")"
 CLIENT_PATTERN="client_set: ::ffff:$GROUP on $UPLINK_IFINDEX => exclude"
 QUERY_PATTERN="querier_iface_timer: sending generic IGMP-query on $DOWNLINK_IFINDEX"
 
-echo "Starting omcproxy on $UPLINK -> $DOWNLINK (scope=organization)"
+echo "Starting omcproxy on $UPLINK -> $DOWNLINK ($FILTER)"
 
-"$OMCPROXY" -v "$UPLINK,$DOWNLINK,scope=organization" >"$LOG" 2>&1 &
+"$OMCPROXY" -v "$UPLINK,$DOWNLINK,$FILTER" >"$LOG" 2>&1 &
 PID=$!
 
 wait_for_log "$QUERY_PATTERN" ||
